@@ -1,9 +1,18 @@
 import google.generativeai as genai
 import chromadb
 from sentence_transformers import SentenceTransformer
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # 1. Setup Gemini and ChromaDB
-genai.configure(api_key='AIzaSyAVW9xLax6jtA5PwCl7McUxzJdtqPub_wY')
+api_key = os.getenv("GEMINI_API_KEY")
+
+if not api_key:
+    print("API Key not found! Please check your .env file.")
+else:
+    genai.configure(api_key=api_key)
 model_gemini = genai.GenerativeModel('gemini-2.5-flash')
 
 client = chromadb.PersistentClient(path="./policynav_db")
