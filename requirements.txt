@@ -1,0 +1,9 @@
+langchain-text-splitters 
+chromadb 
+sentence-transformers 
+pymupdf 
+playwright
+chromium
+google-generativeai
+python-dotenv
+streamlit
