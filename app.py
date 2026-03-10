@@ -5,17 +5,17 @@ from sentence_transformers import SentenceTransformer
 import json
 import os
 from dotenv import load_dotenv
+from database import init_db, save_user_profile, get_user_profile, save_chat_message, get_chat_history
+
+# Initialize the SQLite database tables
+init_db()
 
 load_dotenv()
 
 # --- 1. CACHED RESOURCE LOADING ---
-
 @st.cache_resource
 def load_models():
     """Loads the AI models and DB once and keeps them in memory."""
-    print("Initializing Models (This should only run ONCE)...")
-    
-    # 1. Load Embedding Model
     embed_model = SentenceTransformer("all-MiniLM-L6-v2")
     api_key = os.getenv("GEMINI_API_KEY")
 
@@ -24,98 +24,72 @@ def load_models():
     else:
         genai.configure(api_key=api_key)
     
+    # Using the stable 1.5-flash model
     llm_model = genai.GenerativeModel('models/gemini-2.5-flash')
     
-    # 3. Connect to ChromaDB
     db_client = chromadb.PersistentClient(path="./policynav_db")
     db_collection = db_client.get_or_create_collection(name="tamilnadu_schemes")
     
     return embed_model, llm_model, db_collection
 
-# Fetch the global instances (Fast after the first run)
 embedding_model, model_gemini, collection = load_models()
 
-# --- 2. REST OF YOUR APP LOGIC ---
-# (The rest of your app.py remains the same)
-
-# --- 2. LOGIC FUNCTIONS ---
-def get_intent(query):
-    prompt = f"Extract entities from this query in strict JSON: '{query}'. Fields: Business_Type, Location, Category."
-    response = model_gemini.generate_content(prompt)
-    # Basic cleaning to handle potential markdown in response
-    clean_json = response.text.replace("```json", "").replace("```", "").strip()
-    return json.loads(clean_json)
-
-def get_roadmap(query):
-    query_vector = embedding_model.encode(query).tolist()
-    results = collection.query(query_embeddings=[query_vector], n_results=4)
-    
+# --- 2. CHAT LOGIC ---
+def get_ai_response(user_query, history):
+    # RAG Search in your Mass Scraped DB
+    query_vector = embedding_model.encode(user_query).tolist()
+    results = collection.query(query_embeddings=[query_vector], n_results=5)
     context = "\n".join(results['documents'][0])
-    # Store sources in session state so the UI can access them later
-    st.session_state.sources = results['metadatas'][0] 
     
-   
-    prompt = f"""
-    Using ONLY the context below, provide a highly detailed roadmap for: {query}.
-    CONTEXT: {context}
-
-    IF AVAILABLE in the context, you MUST include:
-    - Direct Registration/Application URLs.
-    - Contact Numbers and Department Email IDs.
-    - Physical Office Addresses (e.g., MSME-DFO Guindy).
-
-    Format the output with bold headers and bullet points for easy reading.
+    # Building the Chat Prompt with Memory context
+    # We pass the last few messages to the AI so it remembers the conversation
+    full_prompt = f"""
+    You are PolicyNav, an AI Civic Consultant for Tamil Nadu.
+    
+    CONTEXT FROM GOVT RECORDS:
+    {context}
+    
+    CONVERSATION HISTORY:
+    {history}
+    
+    USER QUESTION:
+    {user_query}
+    
+    INSTRUCTIONS:
+    - If the user asks for a roadmap, provide one with Compliance, Schemes, and Documents.
+    - Always include Registration URLs, Contact Numbers, and Office Addresses if available in the context.
+    - If the user asks a follow-up, answer based on the context and previous chat history.
     """
-    return model_gemini.generate_content(prompt).text
+    return model_gemini.generate_content(full_prompt).text
 
 # --- 3. UI LAYOUT ---
-st.title("📜 PolicyNav: TN Civic Consultant")
-st.markdown("Helping you navigate Tamil Nadu government policies and schemes with AI.")
+st.title("📜 PolicyNav: AI Civic Consultant")
+st.markdown("Interactive guidance for Tamil Nadu government policies.")
 
-# Initialize session state for the workflow
-if "step" not in st.session_state:
-    st.session_state.step = 1
+# Initialize chat history
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-# STEP 1: SMART INTAKE
-if st.session_state.step == 1:
-    st.subheader("How can we help you today?")
-    user_input = st.text_input("e.g., I want to start a small tea stall in Chennai as an unemployed youth.")
-    
-    if st.button("Generate My Roadmap"):
-        if user_input:
-            with st.spinner("Analyzing Intent & Searching Records..."):
-                st.session_state.intent = get_intent(user_input)
-                st.session_state.roadmap = get_roadmap(user_input)
-                st.session_state.step = 2
-                st.rerun()
+# Display chat history from session state
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-# STEP 2: STRUCTURED DASHBOARD
-elif st.session_state.step == 2:
-    # Sidebar Profile Card
-    with st.sidebar:
-        st.header("👤 Your Profile")
-        st.write(f"**Business:** {st.session_state.intent.get('Business_Type', 'N/A')}")
-        st.write(f"**Location:** {st.session_state.intent.get('Location', 'N/A')}")
-        if st.button("Reset / New Search"):
-            st.session_state.step = 1
-            st.rerun()
+# Chat Input
+if prompt := st.chat_input("How can I help you today?"):
+    # Add user message to chat history
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
-    # Main Output Cards
-    st.success("✅ Roadmap Successfully Generated!")
-    
-    # Using Tabs for the "Non-Normal Chat" feel
-    tab1, tab2 = st.tabs(["📋 Your Custom Roadmap", "📂 Source Documents"])
-    
-    with tab1:
-        st.markdown(st.session_state.roadmap)
-    
-    with tab2:
-        st.info("These recommendations are based on verified TN Government Records & MSME Booklets.")
+    # Generate and display assistant response
+    with st.chat_message("assistant"):
+        # Format history for the AI
+        chat_history_text = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.messages[-5:]])
         
-        if "sources" in st.session_state:
-            st.subheader("Reference Materials Used:")
-            for meta in st.session_state.sources:
-                # Create a nice card for each source found in your policynav_db
-                with st.expander(f"📄 {meta.get('scheme_name', 'Government Policy')}"):
-                    st.write(f"**Section:** {meta.get('tab', 'General Info')}")
-                    st.write(f"**Source Link:** {meta.get('source', 'Local Database')}")
+        with st.spinner("Consulting government records..."):
+            response = get_ai_response(prompt, chat_history_text)
+            st.markdown(response)
+    
+    # Add assistant response to history
+    st.session_state.messages.append({"role": "assistant", "content": response})
