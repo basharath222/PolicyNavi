@@ -7,3 +7,4 @@ chromium
 google-generativeai
 python-dotenv
 streamlit
+plotly
