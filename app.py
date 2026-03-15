@@ -10,12 +10,43 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 from dotenv import load_dotenv
+import sys  # ADDED for deployment
 
 load_dotenv()
 
+# --- ADD THIS SECTION FOR DEPLOYMENT ---
+# Check if database exists, if not show instructions
+if not os.path.exists("./policynav_db"):
+    st.warning("""
+    ### 📦 First-time Setup Required
+    
+    The database is being initialized. This happens only once during deployment.
+    
+    If you're seeing this message:
+    1. Wait 2-3 minutes for database creation
+    2. Refresh the page
+    
+    If the issue persists, check that your CSV file is uploaded correctly.
+    """)
+    
+    # Try to initialize database (will work on Streamlit Cloud)
+    try:
+        with st.spinner("🔄 Initializing database... This may take a few minutes..."):
+            import subprocess
+            result = subprocess.run([sys.executable, "init_db.py"], 
+                                  capture_output=True, text=True)
+            if result.returncode == 0:
+                st.success("✅ Database initialized! Refreshing...")
+                st.rerun()
+            else:
+                st.error(f"Database init failed: {result.stderr}")
+    except:
+        pass
+# --- END DEPLOYMENT SECTION ---
+
 # --- PAGE CONFIG ---
 st.set_page_config(
-    page_title="PolicyNav - Tamil Nadu Schemes", 
+    page_title="PolicyNav - Indian Schemes", 
     page_icon="🎯",
     layout="wide"
 )
@@ -24,7 +55,11 @@ st.set_page_config(
 @st.cache_resource
 def load_models():
     embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        st.error("❌ GEMINI_API_KEY not found in secrets!")
+        st.stop()
+    genai.configure(api_key=api_key)
     llm_model = genai.GenerativeModel('gemini-2.5-flash')
     
     db_client = chromadb.PersistentClient(path="./policynav_db")
@@ -136,16 +171,16 @@ if 'profile' not in st.session_state:
 # --- SIDEBAR ---
 with st.sidebar:
     st.title("🎯 PolicyNav")
-    st.caption("Tamil Nadu Scheme Advisor")
+    st.caption("Indian Scheme Advisor")
     
     # Database status
-    try:
-        count = collection.count()
-        st.success(f"✅ {count} scheme chunks loaded")
-        st.info(f"📊 {count//10} schemes available")  # Approximate
-    except:
-        st.error("❌ Database not found. Run load_from_csv.py first")
-        st.stop()
+    # try:
+    #     count = collection.count()
+    #     # st.success(f"✅ {count} scheme chunks loaded")
+    #     # st.info(f"📊 {count//10} schemes available")  # Approximate
+    # except:
+    #     st.error("❌ Database not found. Run load_from_csv.py first")
+    #     st.stop()
     
     st.divider()
     
@@ -200,8 +235,8 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN CHAT INTERFACE ---
-st.title("📜 PolicyNav - Tamil Nadu Scheme Advisor")
-st.caption(f"🔍 Searching across {count//10}+ Tamil Nadu government schemes • Ask naturally")
+st.title("📜 PolicyNav - Indian Scheme Advisor")
+# st.caption(f"🔍 Searching across {count//10}+ Tamil Nadu government schemes • Ask naturally")
 
 # Display chat history
 for message in st.session_state.messages:
@@ -274,15 +309,3 @@ if prompt := st.chat_input("e.g., I'm a woman in Chennai wanting to start a busi
             # Save response
             st.session_state.messages.append({"role": "assistant", "content": response_text})
 
-# --- FOOTER ---
-st.divider()
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    st.metric("Total Schemes", f"{count//10}+")
-with col2:
-    st.metric("Your Chats", len(st.session_state.messages) // 2)
-with col3:
-    profile_status = "✅" if st.session_state.profile else "❌"
-    st.metric("Profile", profile_status)
-with col4:
-    st.metric("Status", "🟢 Active")
