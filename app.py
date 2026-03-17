@@ -67,7 +67,80 @@ def check_and_init_database():
         st.error(f"Database check failed: {e}")
         return False
 
-# Call this after loading models but before sidebar
+# --- DATABASE INITIALIZATION FOR DEPLOYMENT ---
+import subprocess
+import time
+
+# Function to check if database has data
+def check_database():
+    try:
+        # Try to connect to ChromaDB
+        client = chromadb.PersistentClient(path=DB_PATH)
+        try:
+            collection = client.get_collection(name="indian_schemes")
+            count = collection.count()
+            return count > 0, count
+        except:
+            # Collection doesn't exist
+            return False, 0
+    except Exception as e:
+        print(f"Database check error: {e}")
+        return False, 0
+
+# Check database status
+db_ready, scheme_count = check_database()
+
+if not db_ready:
+    st.warning("""
+    ### 📦 First-time Setup Required
+    
+    The database is being initialized with 3000+ schemes. This happens only once during deployment.
+    Please wait 2-3 minutes...
+    """)
+    
+    # Create a placeholder for logs
+    log_placeholder = st.empty()
+    
+    try:
+        with st.spinner("🔄 Initializing database... This may take a few minutes..."):
+            # Run init_db.py and capture output in real-time
+            process = subprocess.Popen(
+                [sys.executable, "init_db.py"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1
+            )
+            
+            # Show output in real-time
+            output_lines = []
+            for line in process.stdout:
+                output_lines.append(line)
+                # Show last 5 lines
+                with log_placeholder.expander("📋 Setup Progress", expanded=True):
+                    st.code("".join(output_lines[-10:]))
+            
+            # Wait for process to complete
+            process.wait()
+            
+            if process.returncode == 0:
+                st.success("✅ Database initialized successfully!")
+                # Check again
+                db_ready, scheme_count = check_database()
+                if db_ready:
+                    st.success(f"✅ {scheme_count} schemes loaded!")
+                    st.rerun()
+                else:
+                    st.error("Database initialization completed but no schemes found!")
+            else:
+                # Show error
+                error_output = process.stderr.read()
+                st.error(f"Database init failed: {error_output[:500]}")
+                
+    except Exception as e:
+        st.error(f"Initialization error: {str(e)}")
+else:
+    st.sidebar.success(f"✅ {scheme_count} schemes loaded")
 
 # --- LOAD MODELS ---
 @st.cache_resource

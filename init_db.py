@@ -133,3 +133,20 @@ except:
     pass
 
 print("\n🚀 You can now run the app with: streamlit run app.py")
+# At the end of init_db.py, add verification
+try:
+    # Verify the database was created
+    client = chromadb.PersistentClient(path="./policynav_db")
+    collection = client.get_collection("indian_schemes")
+    final_count = collection.count()
+    print(f"\n✅ FINAL VERIFICATION: {final_count} chunks in database")
+    print(f"📁 Database location: {os.path.abspath('./policynav_db')}")
+    
+    # List a few sample schemes
+    if final_count > 0:
+        sample = collection.peek()
+        print("\n📝 Sample schemes:")
+        for i, meta in enumerate(sample['metadatas'][:3]):
+            print(f"  {i+1}. {meta.get('scheme_name', 'Unknown')}")
+except Exception as e:
+    print(f"⚠️ Final verification failed: {e}")
