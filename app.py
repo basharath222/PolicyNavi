@@ -41,14 +41,21 @@ def check_and_init_database():
     """Check if database has data, if not run init_db.py"""
     try:
         client = chromadb.PersistentClient(path=DB_PATH)
+        embed_model, gemini_model, collection = load_models()
+
         try:
-            collection = client.get_collection(name="indian_schemes")
             count = collection.count()
-            if count > 0:
-                st.sidebar.success(f"✅ {count} schemes loaded")
-                return True
-        except:
-            pass
+            st.sidebar.success(f"✅ {count} schemes loaded")
+        except Exception as e:
+            st.sidebar.error(f"Database error: {e}")
+            # Try to reconnect
+            try:
+                db_client = chromadb.PersistentClient(path=DB_PATH)
+                collection = db_client.get_collection(name="indian_schemes")
+                count = collection.count()
+                st.sidebar.success(f"✅ {count} schemes loaded (reconnected)")
+            except:
+                st.sidebar.error("Database not found")
         
         # Database doesn't exist or is empty
         st.warning("📦 Database is empty. Initializing with 3000+ schemes...")
@@ -377,6 +384,7 @@ with st.sidebar:
         st.rerun()
 
 # --- MAIN CHAT INTERFACE ---
+# --- MAIN CHAT INTERFACE ---
 st.title("📜 PolicyNav - Indian Government Scheme Advisor")
 st.caption("Ask about schemes • I'll find what you're eligible for")
 
@@ -403,112 +411,107 @@ if prompt := st.chat_input("Ask about schemes..."):
             profile_text = " ".join([str(v) for v in st.session_state.profile.values() if v])
             search_query = f"{user_state} {prompt} {profile_text}"
             
-            # Search database
-            query_vector = embed_model.encode(search_query).tolist()
-            results = collection.query(
-                query_embeddings=[query_vector], 
-                n_results=15,
-                include=["documents", "metadatas", "distances"]
-            )
+            try:
+                # Search database - with error handling
+                query_vector = embed_model.encode(search_query).tolist()
+                
+                # IMPORTANT: Refresh collection reference before query
+                db_client = chromadb.PersistentClient(path=DB_PATH)
+                collection = db_client.get_collection(name="indian_schemes")
+                
+                results = collection.query(
+                    query_embeddings=[query_vector], 
+                    n_results=15,
+                    include=["documents", "metadatas", "distances"]
+                )
 
-            if results and results['documents'] and results['documents'][0]:
-                # Filter results by state and relevance
-                filtered_docs = []
-                filtered_metas = []
-                seen_schemes = set()  # To avoid duplicates
+                if results and results['documents'] and results['documents'][0]:
+                    # Filter results by state and relevance
+                    filtered_docs = []
+                    filtered_metas = []
+                    seen_schemes = set()
 
-                for i, doc in enumerate(results['documents'][0]):
-                    metadata = results['metadatas'][0][i]
-                    doc_lower = doc.lower()
-                    scheme_name = metadata.get('scheme_name', '')
-                    
-                    # Skip if we already have this scheme
-                    if scheme_name in seen_schemes:
-                        continue
-                    
-                    # Calculate relevance score
-                    distance = results['distances'][0][i] if results['distances'] else 0
-                    relevance = 1 - distance
-                    
-                    # State filtering logic
-                    if user_state:
-                        # Check if scheme is for user's state OR All-India
-                        state_match = (
-                            user_state.lower() in doc_lower or
-                            'all india' in doc_lower or
-                            'central' in doc_lower or
-                            'national' in doc_lower or
-                            'all states' in doc_lower
+                    for i, doc in enumerate(results['documents'][0]):
+                        metadata = results['metadatas'][0][i]
+                        doc_lower = doc.lower()
+                        scheme_name = metadata.get('scheme_name', '')
+                        
+                        if scheme_name in seen_schemes:
+                            continue
+                        
+                        distance = results['distances'][0][i] if results['distances'] else 0
+                        relevance = 1 - distance
+                        
+                        if user_state:
+                            state_match = (
+                                user_state.lower() in doc_lower or
+                                'all india' in doc_lower or
+                                'central' in doc_lower or
+                                'national' in doc_lower or
+                                'all states' in doc_lower
+                            )
+                            
+                            metadata_state = str(metadata.get('state', '')).lower()
+                            metadata_match = (
+                                user_state.lower() in metadata_state or
+                                'all india' in metadata_state
+                            )
+                            
+                            is_relevant = state_match or metadata_match or relevance > 0.6
+                            
+                            if is_relevant:
+                                filtered_docs.append(doc)
+                                filtered_metas.append(metadata)
+                                seen_schemes.add(scheme_name)
+                        else:
+                            if relevance > 0.5:
+                                filtered_docs.append(doc)
+                                filtered_metas.append(metadata)
+                                seen_schemes.add(scheme_name)
+                        
+                        if len(filtered_docs) >= 7:
+                            break
+
+                    if filtered_docs:
+                        context_for_prompt = "\n\n---\n\n".join(filtered_docs)
+                        
+                        profile_lines = []
+                        for k, v in st.session_state.profile.items():
+                            if v and str(v).strip():
+                                profile_lines.append(f"{k}: {v}")
+                        profile_text = " | ".join(profile_lines) if profile_lines else "No profile provided"
+                        
+                        enhanced_prompt = get_enhanced_prompt(
+                            query=prompt,
+                            context_chunks=filtered_docs,
+                            user_profile=st.session_state.profile,
+                            user_state=user_state
                         )
                         
-                        # Check metadata for state
-                        metadata_state = str(metadata.get('state', '')).lower()
-                        metadata_match = (
-                            user_state.lower() in metadata_state or
-                            'all india' in metadata_state
-                        )
+                        messages = [{"role": "user", "parts": [enhanced_prompt]}]
+                        response = gemini_model.generate_content(messages)
+                        response_text = response.text
                         
-                        # Don't automatically exclude if it mentions other states
-                        # Just check if it's relevant to this user's state
-                        is_relevant = state_match or metadata_match or relevance > 0.6
+                        scheme_names = [m.get('scheme_name', 'Scheme') for m in filtered_metas if m.get('scheme_name')]
+                        if scheme_names:
+                            response_text += f"\n\n---\n**📌 Schemes found:** {', '.join(scheme_names)}"
                         
-                        if is_relevant:
-                            filtered_docs.append(doc)
-                            filtered_metas.append(metadata)
-                            seen_schemes.add(scheme_name)
+                        st.markdown(response_text)
                     else:
-                        # No state filter - show all highly relevant
-                        if relevance > 0.5:
-                            filtered_docs.append(doc)
-                            filtered_metas.append(metadata)
-                            seen_schemes.add(scheme_name)
-                    
-                    # Limit to top 7 schemes
-                    if len(filtered_docs) >= 7:
-                        break
-
-                # AFTER the loop - check if we have filtered docs
-                if filtered_docs:
-                    # Format context for prompt
-                    context_for_prompt = "\n\n---\n\n".join(filtered_docs)
-                    
-                    # Format profile text
-                    profile_lines = []
-                    for k, v in st.session_state.profile.items():
-                        if v and str(v).strip():
-                            profile_lines.append(f"{k}: {v}")
-                    profile_text = " | ".join(profile_lines) if profile_lines else "No profile provided"
-                    
-                    # Use get_enhanced_prompt function
-                    enhanced_prompt = get_enhanced_prompt(
-                        query=prompt,
-                        context_chunks=filtered_docs,
-                        user_profile=st.session_state.profile,
-                        user_state=user_state
-                    )
-                    
-                    # Generate response
-                    messages = [{"role": "user", "parts": [enhanced_prompt]}]
-                    response = gemini_model.generate_content(messages)
-                    response_text = response.text
-                    
-                    # Add scheme names from metadata
-                    scheme_names = [m.get('scheme_name', 'Scheme') for m in filtered_metas if m.get('scheme_name')]
-                    if scheme_names:
-                        response_text += f"\n\n---\n**📌 Schemes found:** {', '.join(scheme_names)}"
-                    
-                    st.markdown(response_text)
+                        st.warning(f"No specific schemes found for {user_state}. Showing general results:")
+                        for i, doc in enumerate(results['documents'][0][:3]):
+                            scheme_name = results['metadatas'][0][i].get('scheme_name', 'Scheme')
+                            st.markdown(f"- **{scheme_name}**")
+                        
+                        response_text = f"No specific schemes found for {user_state}. Try a different search."
                 else:
-                    # No filtered results - show what's available
-                    st.warning(f"No specific schemes found for {user_state}. Here are some general schemes:")
-                    for i, doc in enumerate(results['documents'][0][:3]):
-                        scheme_name = results['metadatas'][0][i].get('scheme_name', 'Scheme')
-                        st.markdown(f"- **{scheme_name}**")
+                    response_text = "I couldn't find any schemes. Try different keywords."
+                    st.warning(response_text)
                     
-                    response_text = f"No specific schemes found for {user_state}. Try a different search."
-            else:
-                response_text = "I couldn't find any schemes. Try different keywords."
-                st.warning(response_text)
-
+            except Exception as e:
+                error_msg = str(e)
+                st.error(f"Database query error: {error_msg[:100]}")
+                response_text = "Sorry, I encountered an error while searching. Please try again."
+            
             # Save response
             st.session_state.messages.append({"role": "assistant", "content": response_text})
