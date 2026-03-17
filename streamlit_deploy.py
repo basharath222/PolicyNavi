@@ -9,9 +9,24 @@ print("🚀 PolicyNav Deployment Starting")
 print("=" * 50)
 
 # Check if database exists and has data
-db_exists = os.path.exists("./policynav_db")
+db_path = "./policynav_db"
+db_ready = False
 
-if not db_exists:
+if os.path.exists(db_path):
+    try:
+        import chromadb
+        client = chromadb.PersistentClient(path=db_path)
+        collections = client.list_collections()
+        if len(collections) > 0:
+            collection = client.get_collection("indian_schemes")
+            count = collection.count()
+            if count > 0:
+                print(f"✅ Database already exists with {count} schemes")
+                db_ready = True
+    except Exception as e:
+        print(f"⚠️ Database check failed: {e}")
+
+if not db_ready:
     print("\n📦 First-time setup: Creating database from CSV...")
     print("   This will take 2-3 minutes...\n")
     
@@ -23,21 +38,10 @@ if not db_exists:
     if result.stderr:
         print("Errors:", result.stderr)
     
-    print("\n✅ Database initialization complete!")
-else:
-    print("\n📦 Database already exists, skipping initialization")
-    
-    # Verify database has data
-    try:
-        import chromadb
-        client = chromadb.PersistentClient(path="./policynav_db")
-        collection = client.get_collection("tamilnadu_schemes")
-        count = collection.count()
-        print(f"   • Found {count} chunks in existing database")
-    except:
-        print("   • Database empty or corrupted, will recreate")
-        os.system(f"rm -rf ./policynav_db")
-        subprocess.run([sys.executable, "init_db.py"])
+    if result.returncode == 0:
+        print("\n✅ Database initialization complete!")
+    else:
+        print("\n❌ Database initialization failed!")
 
 print("\n🚀 Starting PolicyNav app...")
 print("=" * 50 + "\n")

@@ -36,6 +36,38 @@ if 'messages' not in st.session_state:
     st.session_state.messages = []
 if 'profile' not in st.session_state:
     st.session_state.profile = {}
+# --- AUTO-INITIALIZE DATABASE IF EMPTY ---
+def check_and_init_database():
+    """Check if database has data, if not run init_db.py"""
+    try:
+        client = chromadb.PersistentClient(path=DB_PATH)
+        try:
+            collection = client.get_collection(name="indian_schemes")
+            count = collection.count()
+            if count > 0:
+                st.sidebar.success(f"✅ {count} schemes loaded")
+                return True
+        except:
+            pass
+        
+        # Database doesn't exist or is empty
+        st.warning("📦 Database is empty. Initializing with 3000+ schemes...")
+        
+        import subprocess
+        result = subprocess.run([sys.executable, "init_db.py"], 
+                              capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            st.success("✅ Database initialized! Refreshing...")
+            st.rerun()
+        else:
+            st.error(f"Database init failed: {result.stderr}")
+            return False
+    except Exception as e:
+        st.error(f"Database check failed: {e}")
+        return False
+
+# Call this after loading models but before sidebar
 
 # --- LOAD MODELS ---
 @st.cache_resource
