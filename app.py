@@ -264,10 +264,15 @@ with st.sidebar:
         education = st.selectbox("Education", ["", "10th", "12th", "Graduate", "Diploma", "ITI"])
         employment = st.selectbox("Employment", ["", "Unemployed", "Employed", "Student", "Business", "Farmer", "Retired"])
         income = st.selectbox("Income", ["", "Below ₹1L", "₹1-2.5L", "₹2.5-5L", "Above ₹5L"])
-        state = st.selectbox("State", [
-            "", "Tamil Nadu", "Kerala", "Karnataka", "Maharashtra", "Delhi", 
-            "Uttar Pradesh", "Gujarat", "Punjab", "Himachal Pradesh", "West Bengal"
-        ])
+        all_states = [
+            "", "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh", 
+            "Goa", "Gujarat", "Haryana", "Himachal Pradesh", "Jharkhand", "Karnataka", 
+            "Kerala", "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya", "Mizoram", 
+            "Nagaland", "Odisha", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu", 
+            "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal", 
+            "Delhi", "Jammu & Kashmir", "Ladakh", "Puducherry"
+        ]
+        state = st.selectbox("State", all_states)
         category = st.selectbox("Category", ["", "General", "SC", "ST", "OBC", "EWS"])
         
         if st.button("💾 Save Profile", use_container_width=True, type="primary"):
