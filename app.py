@@ -353,25 +353,38 @@ if prompt := st.chat_input("Ask about schemes..."):
                 )
 
                 if results and results['documents'] and results['documents'][0]:
-                    # Filter results
+                    # Filter results - ALWAYS include All-India schemes
                     filtered_docs = []
                     filtered_metas = []
+                    all_india_docs = []  # Store All-India schemes separately
                     
-                    for i, doc in enumerate(results['documents'][0][:5]):
+                    # First pass: separate state-specific and All-India schemes
+                    for i, doc in enumerate(results['documents'][0][:10]):
                         metadata = results['metadatas'][0][i]
-                        
-                        # Simple state check
                         doc_lower = doc.lower()
-                        if user_state:
-                            if user_state.lower() in doc_lower or 'all india' in doc_lower:
-                                filtered_docs.append(doc)
-                                filtered_metas.append(metadata)
-                        else:
+                        scheme_name = metadata.get('scheme_name', '')
+                        
+                        # Check if scheme is All-India
+                        is_all_india = any(term in doc_lower for term in [
+                            'all india', 'central', 'national', 'all states', 
+                            'ministry of', 'government of india', 'scheme'
+                        ])
+                        
+                        if is_all_india:
+                            all_india_docs.append((doc, metadata))
+                        elif user_state and user_state.lower() in doc_lower:
+                            # State-specific scheme for user's state
                             filtered_docs.append(doc)
                             filtered_metas.append(metadata)
                     
+                    # Add All-India schemes to results (they're relevant for EVERYONE)
+                    for doc, metadata in all_india_docs[:3]:  # Limit to top 3 All-India
+                        filtered_docs.append(doc)
+                        filtered_metas.append(metadata)
+                    
+                    # If we have results, show them
                     if filtered_docs:
-                        # Generate response
+                        # Generate response with enhanced prompt
                         enhanced_prompt = get_enhanced_prompt(
                             query=prompt,
                             context_chunks=filtered_docs,
@@ -388,12 +401,15 @@ if prompt := st.chat_input("Ask about schemes..."):
                             response_text += f"\n\n---\n**📌 Schemes found:** {', '.join(scheme_names)}"
                         
                         st.markdown(response_text)
+                    
+                    # If NO results at all (shouldn't happen with All-India fallback)
                     else:
-                        st.info("No schemes found for your state. Showing general results:")
+                        st.info("Searching for relevant schemes...")
+                        # Show top results as fallback
                         for i, doc in enumerate(results['documents'][0][:3]):
                             scheme_name = results['metadatas'][0][i].get('scheme_name', 'Scheme')
                             st.markdown(f"- **{scheme_name}**")
-                        response_text = "No state-specific schemes found."
+                        response_text = "Showing general schemes. Try refining your search."
                 else:
                     response_text = "I couldn't find any schemes. Try different keywords."
                     st.warning(response_text)
