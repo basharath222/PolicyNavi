@@ -110,7 +110,7 @@ def get_enhanced_prompt(query, context_chunks, user_profile, user_state):
 ### 2. INCLUSIVE MATCHING - CONNECT THE DOTS
 - **"Post-Matric"** = includes 12th pass, graduation, and ALL higher education
 - **"Scholarship"** = financial aid for students (any level)
-- **"SC/ST/OBC"** = includes the specific category the user belongs to
+- **"SC/ST/OBC/General(BC)"** = includes the specific category the user belongs to
 - **"Professional courses" / "Degree courses" / "Technical Education"** = includes engineering
 - **"Diploma"** = includes polytechnic/engineering diplomas
 - **"Post-Matric Scholarship"** in ANY context = applies to students after 10th (11th, 12th, graduation)
