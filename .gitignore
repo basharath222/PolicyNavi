@@ -10,6 +10,7 @@ ENV/
 env.bak/
 venv.bak/
 pythonenv.*
+.envv
 
 # Streamlit specific
 .streamlit/secrets.toml
@@ -79,4 +80,3 @@ coverage.xml
 *.cover
 *.py,cover
 .hypothesis/
-envi
