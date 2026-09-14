@@ -3,12 +3,12 @@ import google.generativeai as genai
 import chromadb
 from sentence_transformers import SentenceTransformer
 import os
+import sys
 import pandas as pd
 import smtplib
 from email.mime.text import MIMEText
 from datetime import datetime
 from dotenv import load_dotenv
-import sys
 
 load_dotenv()
 
@@ -24,6 +24,8 @@ st.set_page_config(
 
 # --- CONSTANTS ---
 DB_PATH = "./policynav_db"
+CSV_PATH = "cleaned_my_scheme_data_fixed.csv"
+COLLECTION_NAME = "indian_schemes"
 
 # --- Windows event loop fix ---
 if sys.platform == "win32":
@@ -36,14 +38,73 @@ if 'messages' not in st.session_state:
 if 'profile' not in st.session_state:
     st.session_state.profile = {}
 
+# --- HELPER: INITIALIZE DATABASE FROM CSV ---
+def build_vector_database(db_client, embed_model):
+    """Parses CSV dataset and builds local persistent ChromaDB collection."""
+    if not os.path.exists(CSV_PATH):
+        st.error(f"❌ Dataset file '{CSV_PATH}' was not found in the repository root.")
+        return None, 0
+
+    collection = db_client.get_or_create_collection(name=COLLECTION_NAME)
+    
+    df = pd.read_csv(CSV_PATH)
+    df = df.fillna("")
+
+    documents = []
+    metadatas = []
+    ids = []
+
+    for idx, row in df.iterrows():
+        scheme_name = str(row.get("scheme_name", "")).strip()
+        details = str(row.get("details", "")).strip()
+        benefits = str(row.get("benefits", "")).strip()
+        eligibility = str(row.get("eligibility", "")).strip()
+        state = str(row.get("state", "All-India")).strip()
+        category = str(row.get("category", "")).strip()
+
+        # Combine text for vector indexing
+        content_chunk = (
+            f"Scheme Name: {scheme_name}\n"
+            f"State: {state}\n"
+            f"Category: {category}\n"
+            f"Details: {details}\n"
+            f"Eligibility: {eligibility}\n"
+            f"Benefits: {benefits}"
+        )
+        
+        documents.append(content_chunk)
+        metadatas.append({
+            "scheme_name": scheme_name,
+            "state": state,
+            "category": category
+        })
+        ids.append(f"scheme_{idx}")
+
+    # Batch embedding creation
+    batch_size = 64
+    for i in range(0, len(documents), batch_size):
+        end_idx = i + batch_size
+        batch_docs = documents[i:end_idx]
+        batch_metas = metadatas[i:end_idx]
+        batch_ids = ids[i:end_idx]
+        
+        batch_embeddings = embed_model.encode(batch_docs).tolist()
+        
+        collection.add(
+            documents=batch_docs,
+            embeddings=batch_embeddings,
+            metadatas=batch_metas,
+            ids=batch_ids
+        )
+
+    return collection, collection.count()
+
 # --- LOAD MODELS AND DATABASE ---
 @st.cache_resource
 def load_models_and_db():
-    """Load all models and database connection"""
-    # Load embedding model
+    """Load all models and ensure database connection/initialization"""
     embed_model = SentenceTransformer("all-MiniLM-L6-v2")
     
-    # Load Gemini
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         st.error("❌ GEMINI_API_KEY not found in secrets!")
@@ -51,32 +112,29 @@ def load_models_and_db():
     genai.configure(api_key=api_key)
     llm_model = genai.GenerativeModel('gemini-2.5-flash')
     
-    # Connect to database
     db_client = chromadb.PersistentClient(path=DB_PATH)
     
-    # Get collection and verify it exists
     try:
-        collection = db_client.get_collection(name="indian_schemes")
+        collection = db_client.get_collection(name=COLLECTION_NAME)
         count = collection.count()
-        return embed_model, llm_model, collection, count
-    except Exception as e:
-        st.error(f"❌ Database connection failed: {e}")
-        st.info("Please run init_db.py first to create the database.")
-        return embed_model, llm_model, None, 0
+        if count == 0:
+            raise ValueError("Collection empty")
+    except Exception:
+        with st.spinner("⚙️ ChromaDB not detected on server. Populating 3,313+ schemes from CSV..."):
+            collection, count = build_vector_database(db_client, embed_model)
+            if collection is None:
+                return embed_model, llm_model, None, 0
 
-# Load everything
+    return embed_model, llm_model, collection, count
+
 embed_model, gemini_model, collection, scheme_count = load_models_and_db()
 
 # --- ENHANCED PROMPT FUNCTION ---
 def get_enhanced_prompt(query, context_chunks, user_profile, user_state):
-    """Generate prompt with user context and state filtering"""
-    
     formatted_context = "\n\n---\n\n".join(context_chunks) if context_chunks else "No relevant schemes found."
-    
     profile_text = "\n".join([f"- **{k}:** {v}" for k, v in user_profile.items() if v]) if user_profile else "No profile provided"
     
     prompt = f"""You are PolicyNav, an expert assistant on Indian government schemes. Your task is to provide accurate, helpful information based ONLY on the retrieved context.
-
 
 ## 👤 USER CONTEXT
 - **State:** {user_state if user_state else 'Not specified'}
@@ -87,17 +145,13 @@ def get_enhanced_prompt(query, context_chunks, user_profile, user_state):
 - **Gender:** {user_profile.get('gender', 'Not specified')}
 - **Income:** {user_profile.get('income', 'Not specified')}
 
-
 ## 🔍 USER QUERY
 {query}
-
 
 ## 📚 RETRIEVED SCHEMES (CONTEXT ONLY - USE THESE)
 {formatted_context}
 
-
 ## 🎯 RESPONSE INSTRUCTIONS - FOLLOW EXACTLY
-
 
 ### 1. STATE FILTERING (CRITICAL)
 - User is from: **{user_state if user_state else 'Unknown'}**
@@ -105,7 +159,6 @@ def get_enhanced_prompt(query, context_chunks, user_profile, user_state):
   a) Specifically for {user_state}
   b) "All-India" / "Central" / "National" schemes
   c) If a scheme mentions other states (Kerala, Karnataka, etc.), **DO NOT** recommend it to this user
-
 
 ### 2. INCLUSIVE MATCHING - CONNECT THE DOTS
 - **"Post-Matric"** = includes 12th pass, graduation, and ALL higher education
@@ -116,109 +169,53 @@ def get_enhanced_prompt(query, context_chunks, user_profile, user_state):
 - **"Post-Matric Scholarship"** in ANY context = applies to students after 10th (11th, 12th, graduation)
 - If a scheme name contains **"Scholarship"** and the user is a student, it is HIGHLY RELEVANT
 
-
 ### 3. FOR SCHOLARSHIP QUERIES (SPECIAL HANDLING)
 When user asks about scholarships for SC students:
-- Look for ANY scheme containing: "scholarship", "Post-Matric", "SC", "ST", "Postmatric","if Category is General it means it is BC (Backward class)"
+- Look for ANY scheme containing: "scholarship", "Post-Matric", "SC", "ST", "Postmatric", "if Category is General it means it is BC (Backward class)"
 - "Postmatric Scholarship" in the context ALWAYS applies to 12th pass students
 - Do NOT exclude a scheme just because it doesn't explicitly say "engineering" - if it's a scholarship for higher education, it can be used for engineering
 - If a scheme is for "BC/MBC" but also mentions "SC" anywhere in the text, include it
 - If a scheme is for "Minorities" but the user is SC, DO NOT include it
 
-
 ### 4. RESPONSE STRUCTURE
-
-
-#### For EACH relevant scheme, provide:
+For EACH relevant scheme, provide:
 ### 🏷️ Scheme Name
 **📝 Details:** (2-3 sentences about the scheme)
-
 
 **✅ Eligibility:** (Bullet points explaining who can apply)
 - ✓ **Matches your profile:** [explain what matches]
 - ⚠️ **Note:** [explain any differences or requirements]
 
-
 **💰 Benefits:** (What the user gets - amounts, facilities, etc.)
-
 
 **📄 Application Process:** (Step-by-step instructions)
 
-
 **📑 Documents Required:** (Bullet list)
 
-
 **🔗 Source URL:** (If available in context)
-
 
 #### If MULTIPLE schemes apply:
 - List each scheme with full details as above
 - Add a comparison table at the end:
   | Scheme Name | Target Group | Key Benefit | State |
 
-
 #### If PARTIAL matches exist:
 - Include them with clear explanations
-- Example: "This scheme is for BC/MBC students, but also mentions SC eligibility. You should verify with the department."
-
 
 #### If NO schemes match:
 - Check if there are ANY scholarship schemes in the context
 - If there are, explain why they don't match and suggest alternatives
 - If none, say: "I couldn't find any schemes matching your exact criteria. Would you like to try a different search?"
 
-
-### 5. EXAMPLE FOR SCHOLARSHIP QUERY
-
-
-### 🏷️ Post-Matric Scholarship for SC/ST Students
-**📝 Details:** A scholarship for Scheduled Caste and Scheduled Tribe students pursuing education after Class 10, including engineering degrees.
-
-
-**✅ Eligibility:**
-- ✓ You belong to SC category (matches your profile)
-- ✓ You have passed 12th and are pursuing higher education
-- ✓ You are from {user_state}
-- Family income should not exceed ₹2.5 lakh per annum
-- Must be enrolled in a recognized institution
-
-
-**💰 Benefits:**
-- Full tuition fee reimbursement
-- Monthly maintenance allowance
-- Book grant
-
-
-**📄 Application Process:**
-1. Apply through National Scholarship Portal
-2. Register and fill application
-3. Upload documents
-4. Submit to institution for verification
-
-
-**📑 Documents Required:**
-- Aadhaar Card
-- Community Certificate
-- Marksheets
-- Income Certificate
-- Bank Details
-
-
-**🔗 Source URL:** scholarships.gov.in
-
-
-### 6. CRITICAL RULES
+### 5. CRITICAL RULES
 - **NEVER** invent information not in the context
 - **ALWAYS** explain why a scheme applies or doesn't apply
 - If details are missing, say what's available
 - Be helpful, clear, and solution-oriented
 - Do NOT use apologetic language ("I'm sorry", "Unfortunately")
 
-
 ## 💬 YOUR RESPONSE:"""
-   
     return prompt
-
 
 # --- EMAIL FUNCTION ---
 def send_email(to_email, subject, body):
@@ -248,7 +245,6 @@ with st.sidebar:
     st.title("🎯 PolicyNav")
     st.caption("AI-Powered Scheme Advisor")
     
-    # Database status
     if collection is not None:
         st.success(f"✅ {scheme_count} schemes loaded")
     else:
@@ -257,7 +253,6 @@ with st.sidebar:
     
     st.divider()
     
-    # User profile
     with st.expander("📝 Your Profile", expanded=True):
         age = st.number_input("Age", 18, 100, 30)
         gender = st.selectbox("Gender", ["", "Male", "Female", "Other"])
@@ -289,7 +284,6 @@ with st.sidebar:
     
     st.divider()
     
-    # Email summary
     with st.expander("📧 Email Summary", expanded=False):
         email = st.text_input("Your Email")
         if st.button("📨 Send Summary", use_container_width=True):
@@ -316,35 +310,26 @@ with st.sidebar:
 st.title("📜 PolicyNav - Indian Government Scheme Advisor")
 st.caption("Ask about schemes • I'll find what you're eligible for")
 
-# Display chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Chat input
 if prompt := st.chat_input("Ask about schemes..."):
     if collection is None:
         st.error("Database not available. Please check initialization.")
         st.stop()
     
-    # Add user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
     
-    # Generate response
     with st.chat_message("assistant"):
         with st.spinner("🔍 Searching schemes..."):
-            
             try:
-                # Get user state
                 user_state = st.session_state.profile.get('state', '')
-                
-                # Create search query
                 profile_text = " ".join([str(v) for v in st.session_state.profile.values() if v])
                 search_query = f"{user_state} {prompt} {profile_text}"
                 
-                # Search database
                 query_vector = embed_model.encode(search_query).tolist()
                 results = collection.query(
                     query_embeddings=[query_vector], 
@@ -353,18 +338,14 @@ if prompt := st.chat_input("Ask about schemes..."):
                 )
 
                 if results and results['documents'] and results['documents'][0]:
-                    # Filter results - ALWAYS include All-India schemes
                     filtered_docs = []
                     filtered_metas = []
-                    all_india_docs = []  # Store All-India schemes separately
+                    all_india_docs = []
                     
-                    # First pass: separate state-specific and All-India schemes
                     for i, doc in enumerate(results['documents'][0][:10]):
                         metadata = results['metadatas'][0][i]
                         doc_lower = doc.lower()
-                        scheme_name = metadata.get('scheme_name', '')
                         
-                        # Check if scheme is All-India
                         is_all_india = any(term in doc_lower for term in [
                             'all india', 'central', 'national', 'all states', 
                             'ministry of', 'government of india', 'scheme'
@@ -373,18 +354,14 @@ if prompt := st.chat_input("Ask about schemes..."):
                         if is_all_india:
                             all_india_docs.append((doc, metadata))
                         elif user_state and user_state.lower() in doc_lower:
-                            # State-specific scheme for user's state
                             filtered_docs.append(doc)
                             filtered_metas.append(metadata)
                     
-                    # Add All-India schemes to results (they're relevant for EVERYONE)
-                    for doc, metadata in all_india_docs[:3]:  # Limit to top 3 All-India
+                    for doc, metadata in all_india_docs[:3]:
                         filtered_docs.append(doc)
                         filtered_metas.append(metadata)
                     
-                    # If we have results, show them
                     if filtered_docs:
-                        # Generate response with enhanced prompt
                         enhanced_prompt = get_enhanced_prompt(
                             query=prompt,
                             context_chunks=filtered_docs,
@@ -395,17 +372,13 @@ if prompt := st.chat_input("Ask about schemes..."):
                         response = gemini_model.generate_content(enhanced_prompt)
                         response_text = response.text
                         
-                        # Add scheme names
                         scheme_names = [m.get('scheme_name', 'Scheme') for m in filtered_metas]
                         if scheme_names:
                             response_text += f"\n\n---\n**📌 Schemes found:** {', '.join(scheme_names)}"
                         
                         st.markdown(response_text)
-                    
-                    # If NO results at all (shouldn't happen with All-India fallback)
                     else:
                         st.info("Searching for relevant schemes...")
-                        # Show top results as fallback
                         for i, doc in enumerate(results['documents'][0][:3]):
                             scheme_name = results['metadatas'][0][i].get('scheme_name', 'Scheme')
                             st.markdown(f"- **{scheme_name}**")
@@ -418,5 +391,4 @@ if prompt := st.chat_input("Ask about schemes..."):
                 response_text = f"Search error: {str(e)[:100]}"
                 st.error(response_text)
             
-            # Save response
             st.session_state.messages.append({"role": "assistant", "content": response_text})
