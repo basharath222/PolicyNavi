@@ -62,7 +62,6 @@ def build_vector_database(db_client, embed_model):
         state = str(row.get("state", "All-India")).strip()
         category = str(row.get("category", "")).strip()
 
-        # Combine text for vector indexing
         content_chunk = (
             f"Scheme Name: {scheme_name}\n"
             f"State: {state}\n"
@@ -80,7 +79,6 @@ def build_vector_database(db_client, embed_model):
         })
         ids.append(f"scheme_{idx}")
 
-    # Batch embedding creation
     batch_size = 64
     for i in range(0, len(documents), batch_size):
         end_idx = i + batch_size
@@ -131,6 +129,7 @@ embed_model, gemini_model, collection, scheme_count = load_models_and_db()
 
 # --- ENHANCED PROMPT FUNCTION ---
 def get_enhanced_prompt(query, context_chunks, user_profile, user_state):
+    """Generate prompt with user context and state filtering"""
     formatted_context = "\n\n---\n\n".join(context_chunks) if context_chunks else "No relevant schemes found."
     profile_text = "\n".join([f"- **{k}:** {v}" for k, v in user_profile.items() if v]) if user_profile else "No profile provided"
     
@@ -171,14 +170,14 @@ def get_enhanced_prompt(query, context_chunks, user_profile, user_state):
 
 ### 3. FOR SCHOLARSHIP QUERIES (SPECIAL HANDLING)
 When user asks about scholarships for SC students:
-- Look for ANY scheme containing: "scholarship", "Post-Matric", "SC", "ST", "Postmatric", "if Category is General it means it is BC (Backward class)"
+- Look for ANY scheme containing: "scholarship", "Post-Matric", "SC", "ST", "Postmatric","if Category is General it means it is BC (Backward class)"
 - "Postmatric Scholarship" in the context ALWAYS applies to 12th pass students
 - Do NOT exclude a scheme just because it doesn't explicitly say "engineering" - if it's a scholarship for higher education, it can be used for engineering
 - If a scheme is for "BC/MBC" but also mentions "SC" anywhere in the text, include it
 - If a scheme is for "Minorities" but the user is SC, DO NOT include it
 
 ### 4. RESPONSE STRUCTURE
-For EACH relevant scheme, provide:
+#### For EACH relevant scheme, provide:
 ### 🏷️ Scheme Name
 **📝 Details:** (2-3 sentences about the scheme)
 
@@ -326,14 +325,23 @@ if prompt := st.chat_input("Ask about schemes..."):
     with st.chat_message("assistant"):
         with st.spinner("🔍 Searching schemes..."):
             try:
-                user_state = st.session_state.profile.get('state', '')
-                profile_text = " ".join([str(v) for v in st.session_state.profile.values() if v])
-                search_query = f"{user_state} {prompt} {profile_text}"
+                user_state = st.session_state.profile.get('state', '').strip()
+                user_edu = st.session_state.profile.get('education', '').strip()
+                
+                # Refined search query: do not include "unemployed" or income to avoid pull toward business/loans
+                query_tokens = [prompt]
+                if user_edu:
+                    query_tokens.append(f"{user_edu} education")
+                if user_state:
+                    query_tokens.append(user_state)
+                search_query = " ".join(query_tokens)
                 
                 query_vector = embed_model.encode(search_query).tolist()
+                
+                # Fetch 25 candidates so relevant state schemes are not pushed out
                 results = collection.query(
                     query_embeddings=[query_vector], 
-                    n_results=10,
+                    n_results=25,
                     include=["documents", "metadatas", "distances"]
                 )
 
@@ -342,25 +350,30 @@ if prompt := st.chat_input("Ask about schemes..."):
                     filtered_metas = []
                     all_india_docs = []
                     
-                    for i, doc in enumerate(results['documents'][0][:10]):
+                    for i, doc in enumerate(results['documents'][0]):
                         metadata = results['metadatas'][0][i]
                         doc_lower = doc.lower()
                         
                         is_all_india = any(term in doc_lower for term in [
                             'all india', 'central', 'national', 'all states', 
-                            'ministry of', 'government of india', 'scheme'
+                            'ministry of', 'government of india'
                         ])
                         
-                        if is_all_india:
-                            all_india_docs.append((doc, metadata))
-                        elif user_state and user_state.lower() in doc_lower:
+                        if user_state and user_state.lower() in doc_lower:
                             filtered_docs.append(doc)
                             filtered_metas.append(metadata)
+                        elif is_all_india:
+                            all_india_docs.append((doc, metadata))
                     
+                    # Append top All-India schemes
                     for doc, metadata in all_india_docs[:3]:
                         filtered_docs.append(doc)
                         filtered_metas.append(metadata)
                     
+                    # Retain the top relevant matches for LLM context
+                    filtered_docs = filtered_docs[:8]
+                    filtered_metas = filtered_metas[:8]
+
                     if filtered_docs:
                         enhanced_prompt = get_enhanced_prompt(
                             query=prompt,
@@ -372,9 +385,10 @@ if prompt := st.chat_input("Ask about schemes..."):
                         response = gemini_model.generate_content(enhanced_prompt)
                         response_text = response.text
                         
-                        scheme_names = [m.get('scheme_name', 'Scheme') for m in filtered_metas]
+                        scheme_names = [m.get('scheme_name', 'Scheme') for m in filtered_metas if m.get('scheme_name')]
                         if scheme_names:
-                            response_text += f"\n\n---\n**📌 Schemes found:** {', '.join(scheme_names)}"
+                            unique_names = list(dict.fromkeys(scheme_names))
+                            response_text += f"\n\n---\n**📌 Schemes found:** {', '.join(unique_names)}"
                         
                         st.markdown(response_text)
                     else:
