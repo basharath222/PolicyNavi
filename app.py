@@ -119,7 +119,7 @@ def get_enhanced_prompt(query, context_chunks, user_profile, user_state):
 
 ### 3. FOR SCHOLARSHIP QUERIES (SPECIAL HANDLING)
 When user asks about scholarships for SC students:
-- Look for ANY scheme containing: "scholarship", "Post-Matric", "SC", "ST", "Postmatric"
+- Look for ANY scheme containing: "scholarship", "Post-Matric", "SC", "ST", "Postmatric","if Category is General it means it is BC (Backward class)"
 - "Postmatric Scholarship" in the context ALWAYS applies to 12th pass students
 - Do NOT exclude a scheme just because it doesn't explicitly say "engineering" - if it's a scholarship for higher education, it can be used for engineering
 - If a scheme is for "BC/MBC" but also mentions "SC" anywhere in the text, include it
