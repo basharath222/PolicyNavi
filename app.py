@@ -39,68 +39,62 @@ if 'profile' not in st.session_state:
     st.session_state.profile = {}
 
 # --- HELPER: INITIALIZE DATABASE FROM CSV ---
-def build_vector_database(db_client, embed_model):
-    """Parses CSV dataset and builds local persistent ChromaDB collection."""
+import gc
+
+# --- CONSTANTS ---
+DB_PATH = "./policynav_db"
+CSV_PATH = "cleaned_my_scheme_data_fixed.csv"
+COLLECTION_NAME = "indian_schemes"
+
+# --- HELPER: INITIALIZE DATABASE WITH LOW MEMORY/CPU FOOTPRINT ---
+def build_cloud_db(client, embed_model):
+    """Builds database on first run with low memory and CPU-friendly batching."""
     if not os.path.exists(CSV_PATH):
-        st.error(f"❌ Dataset file '{CSV_PATH}' was not found in the repository root.")
+        st.error(f"❌ Missing dataset: {CSV_PATH}")
         return None, 0
 
-    collection = db_client.get_or_create_collection(name=COLLECTION_NAME)
-    
-    df = pd.read_csv(CSV_PATH)
-    df = df.fillna("")
+    col = client.get_or_create_collection(name=COLLECTION_NAME)
+    df = pd.read_csv(CSV_PATH).fillna("")
 
-    documents = []
-    metadatas = []
-    ids = []
-
+    docs, metas, ids = [], [], []
     for idx, row in df.iterrows():
-        scheme_name = str(row.get("scheme_name", "")).strip()
+        s_name = str(row.get("scheme_name", "")).strip()
         details = str(row.get("details", "")).strip()
         benefits = str(row.get("benefits", "")).strip()
         eligibility = str(row.get("eligibility", "")).strip()
+        app_proc = str(row.get("application_process", row.get("how_to_apply", ""))).strip()
+        docs_req = str(row.get("documents_required", row.get("documents", ""))).strip()
+        url = str(row.get("url", row.get("source_url", ""))).strip()
         state = str(row.get("state", "All-India")).strip()
-        category = str(row.get("category", "")).strip()
+        cat = str(row.get("category", "")).strip()
 
-        content_chunk = (
-            f"Scheme Name: {scheme_name}\n"
-            f"State: {state}\n"
-            f"Category: {category}\n"
-            f"Details: {details}\n"
-            f"Eligibility: {eligibility}\n"
-            f"Benefits: {benefits}"
+        chunk = (
+            f"Scheme Name: {s_name}\nState: {state}\nCategory: {cat}\n"
+            f"Details: {details}\nEligibility: {eligibility}\nBenefits: {benefits}\n"
+            f"Application Process: {app_proc}\nDocuments Required: {docs_req}\nSource URL: {url}"
         )
-        
-        documents.append(content_chunk)
-        metadatas.append({
-            "scheme_name": scheme_name,
-            "state": state,
-            "category": category
-        })
-        ids.append(f"scheme_{idx}")
+        docs.append(chunk)
+        metas.append({"scheme_name": s_name[:100], "state": state, "category": cat, "url": url})
+        ids.append(f"s_{idx}")
 
-    batch_size = 64
-    for i in range(0, len(documents), batch_size):
-        end_idx = i + batch_size
-        batch_docs = documents[i:end_idx]
-        batch_metas = metadatas[i:end_idx]
-        batch_ids = ids[i:end_idx]
-        
-        batch_embeddings = embed_model.encode(batch_docs).tolist()
-        
-        collection.add(
-            documents=batch_docs,
-            embeddings=batch_embeddings,
-            metadatas=batch_metas,
-            ids=batch_ids
-        )
+    # Small batch size + garbage collection prevents Streamlit Cloud CPU throttling
+    batch_sz = 64
+    total = len(docs)
+    progress_bar = st.progress(0, text="⚙️ Initializing scheme database...")
+    
+    for i in range(0, total, batch_sz):
+        end = min(i + batch_sz, total)
+        embs = embed_model.encode(docs[i:end], batch_size=batch_sz, show_progress_bar=False).tolist()
+        col.add(documents=docs[i:end], embeddings=embs, metadatas=metas[i:end], ids=ids[i:end])
+        progress_bar.progress(end / total, text=f"⚙️ Indexing schemes ({end}/{total})...")
+        gc.collect()
 
-    return collection, collection.count()
+    progress_bar.empty()
+    return col, col.count()
 
 # --- LOAD MODELS AND DATABASE ---
 @st.cache_resource
 def load_models_and_db():
-    """Load all models and ensure database connection/initialization"""
     embed_model = SentenceTransformer("all-MiniLM-L6-v2")
     
     api_key = os.getenv("GEMINI_API_KEY")
@@ -113,27 +107,26 @@ def load_models_and_db():
     db_client = chromadb.PersistentClient(path=DB_PATH)
     
     try:
-        collection = db_client.get_collection(name=COLLECTION_NAME)
-        count = collection.count()
+        col = db_client.get_collection(name=COLLECTION_NAME)
+        count = col.count()
         if count == 0:
-            raise ValueError("Collection empty")
+            raise ValueError("Empty collection")
     except Exception:
-        with st.spinner("⚙️ ChromaDB not detected on server. Populating 3,313+ schemes from CSV..."):
-            collection, count = build_vector_database(db_client, embed_model)
-            if collection is None:
+        with st.spinner("Setting up database for first-time cloud deployment..."):
+            col, count = build_cloud_db(db_client, embed_model)
+            if col is None:
                 return embed_model, llm_model, None, 0
 
-    return embed_model, llm_model, collection, count
+    return embed_model, llm_model, col, count
 
 embed_model, gemini_model, collection, scheme_count = load_models_and_db()
 
 # --- ENHANCED PROMPT FUNCTION ---
 def get_enhanced_prompt(query, context_chunks, user_profile, user_state):
-    """Generate prompt with user context and state filtering"""
     formatted_context = "\n\n---\n\n".join(context_chunks) if context_chunks else "No relevant schemes found."
     profile_text = "\n".join([f"- **{k}:** {v}" for k, v in user_profile.items() if v]) if user_profile else "No profile provided"
     
-    prompt = f"""You are PolicyNav, an expert assistant on Indian government schemes. Your task is to provide accurate, helpful information based ONLY on the retrieved context.
+    prompt = f"""You are PolicyNav, an expert civic consultant on Indian government schemes. Your task is to provide accurate, actionable roadmaps based on the retrieved context.
 
 ## 👤 USER CONTEXT
 - **State:** {user_state if user_state else 'Not specified'}
@@ -150,68 +143,32 @@ def get_enhanced_prompt(query, context_chunks, user_profile, user_state):
 ## 📚 RETRIEVED SCHEMES (CONTEXT ONLY - USE THESE)
 {formatted_context}
 
-## 🎯 RESPONSE INSTRUCTIONS - FOLLOW EXACTLY
+## 🎯 INSTRUCTIONS FOR MISSING PROCESS/URL FIELDS:
+1. If the context has explicit "Application Process" or "Documents Required", use them verbatim.
+2. If the context states that the scheme is managed by a specific department (e.g., "Backward Classes and Minorities Welfare Department, Tamil Nadu" or "Higher Education Department") but leaves the application blank:
+   - Formulate standard administrative steps (e.g., "Apply via the head of the admitted institution / College Principal office" or "Visit the District Backward Classes and Minorities Welfare Office / nearest e-Sevai centre").
+   - List essential documents standard for educational assistance: Community Certificate, 10th/12th Marksheets, Income Certificate, College Allotment Order, Fee Receipt, and Bank Passbook copy.
+3. If "Source URL" is blank or not available in the context chunk:
+   - Provide the official state or national portal relevant to this department (e.g., https://www.myscheme.gov.in, https://tnesevai.tn.gov.in, or https://scholarships.gov.in). Do not leave it blank.
 
-### 1. STATE FILTERING (CRITICAL)
-- User is from: **{user_state if user_state else 'Unknown'}**
-- **ONLY** recommend schemes that are:
-  a) Specifically for {user_state}
-  b) "All-India" / "Central" / "National" schemes
-  c) If a scheme mentions other states (Kerala, Karnataka, etc.), **DO NOT** recommend it to this user
-
-### 2. INCLUSIVE MATCHING - CONNECT THE DOTS
-- **"Post-Matric"** = includes 12th pass, graduation, and ALL higher education
-- **"Scholarship"** = financial aid for students (any level)
-- **"SC/ST/OBC/General(BC)"** = includes the specific category the user belongs to
-- **"Professional courses" / "Degree courses" / "Technical Education"** = includes engineering
-- **"Diploma"** = includes polytechnic/engineering diplomas
-- **"Post-Matric Scholarship"** in ANY context = applies to students after 10th (11th, 12th, graduation)
-- If a scheme name contains **"Scholarship"** and the user is a student, it is HIGHLY RELEVANT
-
-### 3. FOR SCHOLARSHIP QUERIES (SPECIAL HANDLING)
-When user asks about scholarships for SC students:
-- Look for ANY scheme containing: "scholarship", "Post-Matric", "SC", "ST", "Postmatric","if Category is General it means it is BC (Backward class)"
-- "Postmatric Scholarship" in the context ALWAYS applies to 12th pass students
-- Do NOT exclude a scheme just because it doesn't explicitly say "engineering" - if it's a scholarship for higher education, it can be used for engineering
-- If a scheme is for "BC/MBC" but also mentions "SC" anywhere in the text, include it
-- If a scheme is for "Minorities" but the user is SC, DO NOT include it
-
-### 4. RESPONSE STRUCTURE
-#### For EACH relevant scheme, provide:
+## 🎯 RESPONSE STRUCTURE PER SCHEME:
 ### 🏷️ Scheme Name
 **📝 Details:** (2-3 sentences about the scheme)
 
-**✅ Eligibility:** (Bullet points explaining who can apply)
+**✅ Eligibility:**
 - ✓ **Matches your profile:** [explain what matches]
-- ⚠️ **Note:** [explain any differences or requirements]
+- ⚠️ **Note:** [explain criteria or constraints]
 
-**💰 Benefits:** (What the user gets - amounts, facilities, etc.)
+**💰 Benefits:** (Financial and non-financial support)
 
-**📄 Application Process:** (Step-by-step instructions)
+**📄 Application Process:** (Step-by-step procedural roadmap)
 
-**📑 Documents Required:** (Bullet list)
+**📑 Documents Required:** (Bullet list of checklist items)
 
-**🔗 Source URL:** (If available in context)
+**🔗 Source Portal:** [Direct link or department portal]
 
-#### If MULTIPLE schemes apply:
-- List each scheme with full details as above
-- Add a comparison table at the end:
-  | Scheme Name | Target Group | Key Benefit | State |
-
-#### If PARTIAL matches exist:
-- Include them with clear explanations
-
-#### If NO schemes match:
-- Check if there are ANY scholarship schemes in the context
-- If there are, explain why they don't match and suggest alternatives
-- If none, say: "I couldn't find any schemes matching your exact criteria. Would you like to try a different search?"
-
-### 5. CRITICAL RULES
-- **NEVER** invent information not in the context
-- **ALWAYS** explain why a scheme applies or doesn't apply
-- If details are missing, say what's available
-- Be helpful, clear, and solution-oriented
-- Do NOT use apologetic language ("I'm sorry", "Unfortunately")
+#### Comparison Table:
+Add a summary table comparing the schemes at the end.
 
 ## 💬 YOUR RESPONSE:"""
     return prompt
@@ -253,16 +210,16 @@ with st.sidebar:
     st.divider()
     
     with st.expander("📝 Your Profile", expanded=True):
-        age = st.number_input("Age", 18, 100, 30)
-        gender = st.selectbox("Gender", ["", "Male", "Female", "Other"])
-        education = st.selectbox("Education", ["", "10th", "12th", "Graduate", "Diploma", "ITI"])
-        employment = st.selectbox("Employment", ["", "Unemployed", "Employed", "Student", "Business", "Farmer", "Retired"])
+        age = st.number_input("Age", 18, 100, 18)
+        gender = st.selectbox("Gender", ["", "Female", "Male", "Other"])
+        education = st.selectbox("Education", ["", "12th", "10th", "Graduate", "Diploma", "ITI"])
+        employment = st.selectbox("Employment", ["", "Student", "Unemployed", "Employed", "Business", "Farmer", "Retired"])
         income = st.selectbox("Income", ["", "Below ₹1L", "₹1-2.5L", "₹2.5-5L", "Above ₹5L"])
         all_states = [
-            "", "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh", 
+            "", "Tamil Nadu", "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh", 
             "Goa", "Gujarat", "Haryana", "Himachal Pradesh", "Jharkhand", "Karnataka", 
             "Kerala", "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya", "Mizoram", 
-            "Nagaland", "Odisha", "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu", 
+            "Nagaland", "Odisha", "Punjab", "Rajasthan", "Sikkim", 
             "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand", "West Bengal", 
             "Delhi", "Jammu & Kashmir", "Ladakh", "Puducherry"
         ]
@@ -323,22 +280,21 @@ if prompt := st.chat_input("Ask about schemes..."):
         st.markdown(prompt)
     
     with st.chat_message("assistant"):
-        with st.spinner("🔍 Searching schemes..."):
+        with st.spinner("🔍 Searching verified schemes..."):
             try:
                 user_state = st.session_state.profile.get('state', '').strip()
                 user_edu = st.session_state.profile.get('education', '').strip()
                 
-                # Refined search query: do not include "unemployed" or income to avoid pull toward business/loans
+                # Context query focused on intent + education
                 query_tokens = [prompt]
                 if user_edu:
-                    query_tokens.append(f"{user_edu} education")
+                    query_tokens.append(f"{user_edu} college education scholarship")
                 if user_state:
                     query_tokens.append(user_state)
                 search_query = " ".join(query_tokens)
                 
                 query_vector = embed_model.encode(search_query).tolist()
                 
-                # Fetch 25 candidates so relevant state schemes are not pushed out
                 results = collection.query(
                     query_embeddings=[query_vector], 
                     n_results=25,
@@ -365,14 +321,12 @@ if prompt := st.chat_input("Ask about schemes..."):
                         elif is_all_india:
                             all_india_docs.append((doc, metadata))
                     
-                    # Append top All-India schemes
                     for doc, metadata in all_india_docs[:3]:
                         filtered_docs.append(doc)
                         filtered_metas.append(metadata)
                     
-                    # Retain the top relevant matches for LLM context
-                    filtered_docs = filtered_docs[:8]
-                    filtered_metas = filtered_metas[:8]
+                    filtered_docs = filtered_docs[:6]
+                    filtered_metas = filtered_metas[:6]
 
                     if filtered_docs:
                         enhanced_prompt = get_enhanced_prompt(
@@ -392,11 +346,8 @@ if prompt := st.chat_input("Ask about schemes..."):
                         
                         st.markdown(response_text)
                     else:
-                        st.info("Searching for relevant schemes...")
-                        for i, doc in enumerate(results['documents'][0][:3]):
-                            scheme_name = results['metadatas'][0][i].get('scheme_name', 'Scheme')
-                            st.markdown(f"- **{scheme_name}**")
-                        response_text = "Showing general schemes. Try refining your search."
+                        response_text = f"No active schemes found matching this criteria for {user_state}."
+                        st.info(response_text)
                 else:
                     response_text = "I couldn't find any schemes. Try different keywords."
                     st.warning(response_text)

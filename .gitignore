@@ -22,7 +22,7 @@ pythonenv.*
 .env.*.local
 
 # Database - IMPORTANT: We'll recreate this on deployment
-policynav_db/
+#policynav_db/
 chroma_db/
 
 # Data files (if any)
@@ -80,3 +80,11 @@ coverage.xml
 *.cover
 *.py,cover
 .hypothesis/
+
+policynav_db/
+
+policynav_db/
+policynav_db.zip
+
+policynav_db/
+policynav_db.zip

@@ -2,151 +2,110 @@
 import pandas as pd
 import chromadb
 from sentence_transformers import SentenceTransformer
-import uuid
 import os
+import sys
 
-print("🚀 Initializing database for deployment...")
-print("=" * 50)
+print("🚀 Initializing database for PolicyNav...")
+print("=" * 60)
 
-# Check if CSV exists
 csv_path = 'cleaned_my_scheme_data_fixed.csv'
+db_path = './policynav_db'
+collection_name = 'indian_schemes'
+
 if not os.path.exists(csv_path):
-    print(f"❌ CSV file not found at {csv_path}")
-    exit(1)
+    print(f"❌ Error: CSV file not found at {csv_path}")
+    sys.exit(1)
 
-# Load CSV data
-print(f"📂 Loading CSV file...")
-df = pd.read_csv(csv_path)
-print(f"📊 Loaded {len(df)} total schemes")
+# 1. Load Dataset
+print(f"📂 Loading {csv_path}...")
+df = pd.read_csv(csv_path).fillna("")
+print(f"📊 Loaded {len(df)} total schemes.")
 
-# Initialize ChromaDB
-print(f"\n🔄 Setting up ChromaDB...")
-client = chromadb.PersistentClient(path="./policynav_db")
+# 2. Setup ChromaDB Local Storage
+print(f"\n🔄 Connecting to ChromaDB storage at {db_path}...")
+client = chromadb.PersistentClient(path=db_path)
 
-# Delete old collection if exists
 try:
-    client.delete_collection("indian_schemes")
-    print("🗑️ Deleted old collection")
-except:
-    print("✨ Creating new collection")
-
-# Create new collection
-collection = client.create_collection(name="indian_schemes")
-
-# Load embedding model
-print(f"\n🤖 Loading embedding model...")
-model = SentenceTransformer("all-MiniLM-L6-v2")
-print(f"✅ Model loaded successfully")
-
-# Process all schemes (NO FILTERING)
-print(f"\n📥 Adding {len(df)} schemes to database...")
-print("-" * 50)
-
-success_count = 0
-error_count = 0
-
-for idx, row in df.iterrows():
-    try:
-        # Create rich text from all columns
-        text_parts = []
-        scheme_metadata = {}
-        
-        for col in df.columns:
-            if pd.notna(row[col]) and str(row[col]).strip():
-                value = str(row[col]).strip()
-                text_parts.append(f"{col}: {value}")
-                
-                # Store important fields in metadata for filtering
-                if col.lower() in ['scheme_name', 'name', 'title']:
-                    scheme_metadata['scheme_name'] = value[:100]
-                elif col.lower() in ['state', 'states', 'beneficiary_states']:
-                    scheme_metadata['state'] = value
-                elif col.lower() in ['category', 'beneficiary_category']:
-                    scheme_metadata['category'] = value
-                elif col.lower() in ['ministry', 'department']:
-                    scheme_metadata['ministry'] = value
-        
-        # Combine all text
-        text = "\n".join(text_parts)
-        
-        # Generate embedding
-        embedding = model.encode(text).tolist()
-        
-        # Ensure scheme_name exists in metadata
-        if 'scheme_name' not in scheme_metadata:
-            scheme_metadata['scheme_name'] = f"Scheme_{idx}"
-        
-        # Add state info if available
-        if 'state' not in scheme_metadata:
-            # Try to detect state from text
-            text_lower = text.lower()
-            if 'tamil nadu' in text_lower or 'tn ' in text_lower:
-                scheme_metadata['state'] = 'Tamil Nadu'
-            elif 'kerala' in text_lower:
-                scheme_metadata['state'] = 'Kerala'
-            elif 'karnataka' in text_lower:
-                scheme_metadata['state'] = 'Karnataka'
-            elif 'maharashtra' in text_lower:
-                scheme_metadata['state'] = 'Maharashtra'
-            elif 'delhi' in text_lower:
-                scheme_metadata['state'] = 'Delhi'
-            elif 'all india' in text_lower or 'central' in text_lower:
-                scheme_metadata['state'] = 'All-India'
-            else:
-                scheme_metadata['state'] = 'Unknown'
-        
-        # Add to database
-        collection.add(
-            ids=[str(uuid.uuid4())],
-            embeddings=[embedding],
-            documents=[text],
-            metadatas=[scheme_metadata]
-        )
-        success_count += 1
-        
-        # Progress indicator
-        if (idx + 1) % 100 == 0:
-            print(f"  ✅ Processed {idx + 1}/{len(df)} schemes...")
-            
-    except Exception as e:
-        error_count += 1
-        print(f"  ❌ Error on row {idx}: {str(e)[:50]}")
-        continue
-
-print("-" * 50)
-print(f"\n✅ Database creation complete!")
-print(f"   • Successfully loaded: {success_count} schemes")
-print(f"   • Errors: {error_count}")
-print(f"   • Total in database: {collection.count()} chunks")
-print(f"   • Database location: ./policynav_db")
-
-# Show sample of states in database
-print(f"\n📊 Sample of states in database:")
-try:
-    results = collection.peek()
-    states_seen = set()
-    for meta in results['metadatas'][:10]:
-        if meta.get('state'):
-            states_seen.add(meta['state'])
-    print(f"   • States found: {', '.join(list(states_seen)[:5])}")
-except:
+    client.delete_collection(name=collection_name)
+    print("🗑️ Removed existing collection to ensure a fresh build.")
+except Exception:
     pass
 
-print("\n🚀 You can now run the app with: streamlit run app.py")
-# At the end of init_db.py, add verification
-try:
-    # Verify the database was created
-    client = chromadb.PersistentClient(path="./policynav_db")
-    collection = client.get_collection("indian_schemes")
-    final_count = collection.count()
-    print(f"\n✅ FINAL VERIFICATION: {final_count} chunks in database")
-    print(f"📁 Database location: {os.path.abspath('./policynav_db')}")
+collection = client.create_collection(name=collection_name)
+
+# 3. Load Embedding Model
+print("\n🤖 Loading Sentence-Transformer ('all-MiniLM-L6-v2')...")
+model = SentenceTransformer("all-MiniLM-L6-v2")
+print("✅ Model loaded successfully.")
+
+# 4. Prepare Chunks and Metadata
+print("\n📦 Structuring scheme records for indexing...")
+documents = []
+metadatas = []
+ids = []
+
+for idx, row in df.iterrows():
+    # Build a complete readable document block
+    text_parts = []
+    for col in df.columns:
+        val = str(row[col]).strip()
+        if val:
+            text_parts.append(f"{col}: {val}")
+    doc_chunk = "\n".join(text_parts)
+
+    # Extract metadata fields for state/demographic guardrails
+    scheme_name = str(row.get('scheme_name', row.get('name', f'Scheme_{idx}'))).strip()
+    state = str(row.get('state', row.get('states', 'All-India'))).strip()
+    category = str(row.get('category', row.get('beneficiary_category', 'General'))).strip()
+    url = str(row.get('url', row.get('source_url', row.get('scheme_link', '')))).strip()
+
+    # Fallback state detection if missing
+    if not state or state.lower() in ['unknown', 'nan', '']:
+        text_lower = doc_chunk.lower()
+        if 'tamil nadu' in text_lower or 'tn ' in text_lower:
+            state = 'Tamil Nadu'
+        elif 'karnataka' in text_lower:
+            state = 'Karnataka'
+        elif 'kerala' in text_lower:
+            state = 'Kerala'
+        elif any(k in text_lower for k in ['all india', 'central', 'national']):
+            state = 'All-India'
+        else:
+            state = 'All-India'
+
+    documents.append(doc_chunk)
+    metadatas.append({
+        "scheme_name": scheme_name[:100],
+        "state": state,
+        "category": category[:50],
+        "url": url
+    })
+    ids.append(f"scheme_{idx}")
+
+# 5. Batch Encoding (Crucial: 20x faster than row-by-row)
+print(f"\n⚡ Batch encoding and indexing {len(documents)} schemes...")
+batch_size = 128
+total_batches = (len(documents) + batch_size - 1) // batch_size
+
+for b_idx in range(total_batches):
+    start = b_idx * batch_size
+    end = min(start + batch_size, len(documents))
     
-    # List a few sample schemes
-    if final_count > 0:
-        sample = collection.peek()
-        print("\n📝 Sample schemes:")
-        for i, meta in enumerate(sample['metadatas'][:3]):
-            print(f"  {i+1}. {meta.get('scheme_name', 'Unknown')}")
-except Exception as e:
-    print(f"⚠️ Final verification failed: {e}")
+    b_docs = documents[start:end]
+    b_metas = metadatas[start:end]
+    b_ids = ids[start:end]
+
+    # Vectorize the entire batch together
+    b_embeddings = model.encode(b_docs, batch_size=batch_size, show_progress_bar=False).tolist()
+
+    collection.add(
+        ids=b_ids,
+        embeddings=b_embeddings,
+        documents=b_docs,
+        metadatas=b_metas
+    )
+    print(f"   Indexed batch {b_idx + 1}/{total_batches} ({end}/{len(documents)} records)")
+
+print("=" * 60)
+print(f"✅ Success! Vector database created with {collection.count()} chunks.")
+print(f"📁 Local storage directory: {os.path.abspath(db_path)}")
